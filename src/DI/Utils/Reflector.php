@@ -10,8 +10,8 @@ use ReflectionIntersectionType;
 use ReflectionNamedType;
 use ReflectionUnionType;
 use Symfony\Component\Messenger\Attribute\AsMessageHandler;
-use Symfony\Component\Messenger\Handler\Acknowledger;
-use Symfony\Component\Messenger\Handler\BatchHandlerInterface;
+use function sprintf;
+use function implode;
 use function array_map;
 use function array_merge;
 
@@ -51,8 +51,10 @@ final class Reflector
 	/**
 	 * @param class-string $class
 	 * @param array{method: string} $options
+	 *
+	 * @return list<string>
 	 */
-	public static function getMessageHandlerMessage(string $class, array $options): string
+	public static function getMessageHandlerMessage(string $class, array $options): array
 	{
 		try {
 			$rc = new ReflectionClass($class);
@@ -66,43 +68,46 @@ final class Reflector
 			throw new LogicalException(sprintf('Handler must have "%s::%s()" method.', $class, $options['method']));
 		}
 
-		if ($rcMethod->getNumberOfParameters() !== 1 && !$rc->implementsInterface( BatchHandlerInterface::class)) {
-			throw new LogicalException(sprintf('Only one parameter is allowed in "%s::%s()."', $class, $options['method']));
+		if (0 === $rcMethod->getNumberOfRequiredParameters()) {
+			throw new LogicalException(sprintf('Handler "%s::%s()" requires at least one argument, first one being the message it handles.', $class, $options['method']));
 		}
 
-		if ($rc->implementsInterface( BatchHandlerInterface::class)) {
-			if ($rcMethod->getNumberOfParameters() !== 2) {
-				throw new LogicalException(sprintf('Exactly two parameters are required in "%s::%s()."', $class, $options['method']));
-			}
-
-			/** @var ReflectionNamedType|ReflectionUnionType|ReflectionIntersectionType|null $type */
-			$type = $rcMethod->getParameters()[1]->getType();
-
-			if (!$type instanceof ReflectionNamedType) {
-				throw new LogicalException(sprintf('Second parameter type for "%s::%s()." must be "%s".', $class, $options['method'], Acknowledger::class));
-			}
-
-			if ($type->getName() !== Acknowledger::class) {
-				throw new LogicalException(sprintf('Second parameter type for "%s::%s()." must be "%s", "%s" given instead.', $class, $options['method'], Acknowledger::class, $type->getName()));
-			}
-		}
+		$parameters = $rcMethod->getParameters();
 
 		/** @var ReflectionNamedType|ReflectionUnionType|ReflectionIntersectionType|null $type */
-		$type = $rcMethod->getParameters()[0]->getType();
+		$type = $parameters[0]->getType();
 
 		if ($type === null) {
 			throw new LogicalException(sprintf('Cannot detect parameter type for "%s::%s()."', $class, $options['method']));
-		}
-
-		if ($type instanceof ReflectionUnionType) {
-			throw new LogicalException(sprintf('Union parameter type for "%s::%s() is not supported."', $class, $options['method']));
 		}
 
 		if ($type instanceof ReflectionIntersectionType) {
 			throw new LogicalException(sprintf('Intersection parameter type for "%s::%s() is not supported."', $class, $options['method']));
 		}
 
-		return $type->getName();
+		if ($type instanceof ReflectionUnionType) {
+			$types = [];
+			$invalidTypes = [];
+			foreach ($type->getTypes() as $subType) {
+				if (!($subType instanceof ReflectionIntersectionType) && !$subType->isBuiltin()) {
+					$types[] = (string) $subType;
+				} else {
+					$invalidTypes[] = (string) $subType;
+				}
+			}
+
+			if ([] !== $types) {
+				return $types;
+			}
+
+			throw new LogicalException(sprintf('Type-hint of argument "$%s" in method "%s::%s()" must be a class , "%s" given.', $parameters[0]->getName(), $class, $options['method'], implode('|', $invalidTypes)));
+		}
+
+		if ($type->isBuiltin()) {
+			throw new LogicalException(sprintf('Builtin parameter type for "%s::%s() is not supported."', $class, $options['method']));
+		}
+
+		return [$type->getName()];
 	}
 
 }
